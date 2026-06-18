@@ -1,0 +1,41 @@
+# Environment variables and local secrets
+.env
+/.env.llm
+.env.local
+.env.*.local
+
+# Python environments and caches
+.venv/
+venv/
+env/
+backend/**/__pycache__/
+backend/**/*.py[cod]
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+backend/.cache/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+
+# Runtime data and generated artifacts
+data/resumes/*
+!data/resumes/.gitkeep
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE and editor settings
+.idea/
+.vscode/
