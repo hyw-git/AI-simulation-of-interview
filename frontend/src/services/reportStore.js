@@ -1,4 +1,4 @@
-import { fetchReports } from './api'
+import { deleteReport, fetchReports, updateReport } from './api'
 import { isLoggedIn } from './authStore'
 
 const STORAGE_KEY = 'ai_interview_reports_v1'
@@ -62,7 +62,8 @@ export function mapServerReport(row) {
       suggestions: report.suggestions || [],
       dimensions: report.dimensions || {},
       weights: report.weights || {},
-      summary: report.summary || ''
+      summary: report.summary || '',
+      evaluation_source: report.evaluation_source || ''
     },
     source: 'server'
   }
@@ -119,6 +120,48 @@ export function saveInterviewReport(record) {
   const next = [record, ...all].slice(0, 100)
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
   return next
+}
+
+export function updateLocalInterviewReport(id, patch) {
+  const all = loadInterviewReports()
+  const next = all.map((item) => {
+    if (String(item.id) !== String(id)) return item
+    const reportPatch = patch.report || {}
+    return {
+      ...item,
+      ...patch,
+      report: {
+        ...(item.report || {}),
+        ...reportPatch
+      },
+      radar: computeRadarDimensions({
+        ...(item.report || {}),
+        ...reportPatch
+      })
+    }
+  })
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  return next
+}
+
+export function deleteLocalInterviewReport(id) {
+  const next = loadInterviewReports().filter(item => String(item.id) !== String(id))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  return next
+}
+
+export async function updateInterviewReport(record, patch) {
+  if (record?.source === 'server') {
+    await updateReport(record.id, patch)
+  }
+  updateLocalInterviewReport(record.id, patch)
+}
+
+export async function deleteInterviewReport(record) {
+  if (record?.source === 'server') {
+    await deleteReport(record.id)
+  }
+  deleteLocalInterviewReport(record.id)
 }
 
 export function clearInterviewReports() {

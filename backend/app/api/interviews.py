@@ -474,6 +474,10 @@ class CodeRunIn(BaseModel):
     stdin: Optional[str] = ''
 
 
+class CodingChallengeIn(BaseModel):
+    refresh: Optional[bool] = False
+
+
 class CodeSubmitIn(BaseModel):
     code: str
     challenge: dict
@@ -485,6 +489,16 @@ class CodeTestIn(BaseModel):
     code: str
     language: Optional[str] = 'python'
     test_cases: Optional[List[dict]] = None
+
+
+class ReportPatchIn(BaseModel):
+    role: Optional[str] = None
+    focus: Optional[str] = None
+    mode: Optional[str] = None
+    difficulty: Optional[int] = None
+    time_limit: Optional[int] = None
+    score: Optional[float] = None
+    summary: Optional[str] = None
 
 
 class OpeningOut(BaseModel):
@@ -984,20 +998,25 @@ async def interview_ws(websocket: WebSocket, interview_id: str):
 
 
 @router.post('/{interview_id}/coding/challenge')
-async def get_coding_challenge(interview_id: str):
+async def get_coding_challenge(interview_id: str, payload: CodingChallengeIn | None = None):
     cfg = _get_session_config(interview_id)
     if not cfg.get('enable_coding'):
         raise HTTPException(status_code=400, detail='本场面试未启用代码实战')
+    refresh = bool(payload.refresh) if payload else False
     pending = cfg.get('pending_coding_challenge')
-    if isinstance(pending, dict) and pending.get('title'):
+    if not refresh and isinstance(pending, dict) and pending.get('title'):
         return pending
-    return ai_service.generate_coding_challenge(
+    excluded = [pending.get('title')] if isinstance(pending, dict) and pending.get('title') else []
+    challenge = ai_service.generate_coding_challenge(
         role=cfg.get('role'),
         difficulty=str(cfg.get('difficulty') or 3),
         resume_keywords=cfg.get('resume_keywords'),
         repo_analysis=cfg.get('repo_analysis'),
         phase=cfg.get('phase'),
+        exclude_titles=excluded if refresh else None,
     )
+    _save_session_config(interview_id, {'pending_coding_challenge': challenge})
+    return challenge
 
 
 @router.post('/{interview_id}/coding/run')
@@ -1022,6 +1041,7 @@ async def submit_interview_code(interview_id: str, payload: CodeSubmitIn):
         payload.code or '',
         run_result,
     )
+    _save_session_config(interview_id, {'pending_coding_challenge': None})
     return {'run_result': run_result, 'evaluation': evaluation}
 
 
@@ -1203,6 +1223,105 @@ async def list_reports(
         return [_serialize_report_row(dict(r)) for r in rows]
     except Exception:
         return []
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.patch('/reports/{report_id}')
+async def update_report(
+    report_id: str,
+    payload: ReportPatchIn,
+    authorization: Optional[str] = Header(default=None),
+):
+    rid = _valid_uuid(report_id)
+    if not rid:
+        raise HTTPException(status_code=400, detail='invalid report id')
+    user = optional_current_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail='请先登录')
+    conn = _db_conn()
+    if not conn:
+        raise HTTPException(status_code=503, detail='数据库不可用')
+
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            'SELECT r.id, r.interview_id, r.generated_at, r.report_json '
+            'FROM reports r JOIN interviews i ON i.id = r.interview_id '
+            'WHERE r.id = %s AND i.user_id = %s',
+            [rid, user['id']],
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail='报告不存在')
+
+        report_json = row.get('report_json') or {}
+        if isinstance(report_json, str):
+            report_json = json.loads(report_json)
+        meta = report_json.get('_meta') or {}
+
+        for key in ('role', 'focus', 'mode', 'difficulty', 'time_limit'):
+            value = getattr(payload, key)
+            if value is not None:
+                meta[key] = value
+        if payload.score is not None:
+            report_json['score'] = max(0, min(100, float(payload.score)))
+        if payload.summary is not None:
+            report_json['summary'] = payload.summary
+        report_json['_meta'] = meta
+
+        cur.execute(
+            'UPDATE reports SET report_json = %s WHERE id = %s RETURNING id, interview_id, generated_at, report_json',
+            [Json(report_json), rid],
+        )
+        updated = cur.fetchone()
+        conn.commit()
+        return _serialize_report_row(dict(updated))
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.delete('/reports/{report_id}')
+async def delete_report(
+    report_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    rid = _valid_uuid(report_id)
+    if not rid:
+        raise HTTPException(status_code=400, detail='invalid report id')
+    user = optional_current_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail='请先登录')
+    conn = _db_conn()
+    if not conn:
+        raise HTTPException(status_code=503, detail='数据库不可用')
+
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            'DELETE FROM reports r USING interviews i '
+            'WHERE r.interview_id = i.id AND r.id = %s AND i.user_id = %s RETURNING r.id',
+            [rid, user['id']],
+        )
+        deleted = cur.fetchone()
+        if not deleted:
+            raise HTTPException(status_code=404, detail='报告不存在')
+        conn.commit()
+        return {'deleted': True, 'id': str(deleted['id'])}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
         conn.close()

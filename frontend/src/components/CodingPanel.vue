@@ -65,7 +65,7 @@
       </section>
 
       <div class="coding-actions">
-        <button class="ghost" type="button" :disabled="busy || !interviewId" @click="reloadChallenge">换一题</button>
+        <button class="ghost" type="button" :disabled="busy || !interviewId" @click="reloadChallenge(true)">换一题</button>
         <button
           class="ghost"
           type="button"
@@ -115,7 +115,7 @@
 
     <section v-else class="state-block">
       <p class="error-text">{{ loadError || '暂无题目' }}</p>
-      <button v-if="interviewId" type="button" :disabled="busy" @click="reloadChallenge">重新加载</button>
+      <button v-if="interviewId" type="button" :disabled="busy" @click="reloadChallenge(false)">重新加载</button>
     </section>
   </aside>
 </template>
@@ -131,7 +131,7 @@ export default {
     interviewId: { type: String, default: '' },
     externalChallenge: { type: Object, default: null }
   },
-  emits: ['close', 'submitted'],
+  emits: ['close', 'submitted', 'challenge-changed'],
   setup(props, { emit }) {
     const challenge = ref(null)
     const loading = ref(false)
@@ -210,13 +210,14 @@ export default {
       testSummary.value = ''
     }
 
-    async function reloadChallenge() {
+    async function reloadChallenge(refresh = false) {
       if (!props.interviewId) return
       loading.value = true
       loadError.value = ''
       try {
-        const c = await fetchCodingChallenge(props.interviewId)
+        const c = await fetchCodingChallenge(props.interviewId, { refresh })
         applyChallenge(c)
+        emit('challenge-changed', c)
       } catch (err) {
         loadError.value = err.message || String(err)
         challenge.value = null
@@ -290,6 +291,7 @@ export default {
           evaluation: evaluation.value,
           run_result: res.run_result
         })
+        emit('challenge-changed', null)
       } catch (err) {
         runOutput.value = `提交失败：${err.message || err}`
       } finally {
@@ -313,7 +315,7 @@ export default {
       ([vis, id, ext]) => {
         if (!vis || !id) return
         if (ext && ext.title) return
-        if (!challenge.value && !loading.value) reloadChallenge()
+        if (!challenge.value && !loading.value) reloadChallenge(false)
       },
       { immediate: true }
     )

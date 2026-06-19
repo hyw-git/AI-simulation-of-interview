@@ -12,6 +12,9 @@ Usage:
 Replace or extend this file to support other providers or streaming.
 """
 import os
+import json
+import random
+import re
 import typing
 
 import requests
@@ -460,6 +463,7 @@ class AIService:
         repo_analysis: dict | None = None,
         phase: str | None = None,
         recent_answer: str | None = None,
+        exclude_titles: typing.List[str] | None = None,
     ) -> dict:
         """生成算法/代码实战题（侧栏手敲）。"""
         diff = 3
@@ -472,7 +476,22 @@ class AIService:
         langs = (repo_analysis or {}).get('language_text') or ''
 
         specs = self._coding_challenge_specs()
-        spec = specs.get(min(5, max(1, diff)), specs[3])
+        level = min(5, max(1, diff))
+        excluded = {str(t).strip() for t in (exclude_titles or []) if str(t).strip()}
+        if excluded:
+            candidates = [
+                (lv, sp) for lv, sp in specs.items()
+                if sp.get('title') not in excluded and abs(lv - level) <= 2
+            ] or [
+                (lv, sp) for lv, sp in specs.items()
+                if sp.get('title') not in excluded
+            ]
+            if candidates:
+                level, spec = random.choice(candidates)
+            else:
+                spec = specs.get(level, specs[3])
+        else:
+            spec = specs.get(level, specs[3])
         body = spec['description']
         if repo_name and phase == 'repo':
             body += f'\n\n结合你刚才介绍的仓库「{repo_name}」：请思考其中{langs or "核心模块"}相关的数据结构与算法取舍。'
@@ -497,7 +516,7 @@ class AIService:
             'starter_code': starters.get(default_lang, ''),
             'starter_codes': starters,
             'test_cases': spec.get('test_cases') or [],
-            'difficulty': diff,
+            'difficulty': level,
         }
 
     def evaluate_code_submission(
@@ -603,6 +622,12 @@ class AIService:
             try:
                 prompt = (
                     "请基于下面的面试记录给出结构化评估。评分维度权重：技术深度30%，问题分析20%，表达清晰20%，工程实践20%，学习潜力10%。"
+                    "请严格按候选人的实际回答打分，不要默认给高分。分数标尺："
+                    "0-39=几乎未回答或严重跑题；40-59=内容浅、缺少有效细节；60-74=基本合格但深度不足；"
+                    "75-84=较好，有清晰思路和部分细节；85-92=优秀，有充分证据、取舍和工程结果；93-100=非常罕见。"
+                    "综合分必须由五个维度加权得到，若证据不足应低于70分。"
+                    "80分以上必须同时满足：回答覆盖多轮核心问题、有具体实现细节、有问题分析或技术取舍、有项目结果或验证证据。"
+                    "若候选人只是泛泛而谈、重复概念或主要是面试官在输出内容，综合分应在40-65之间。"
                     "输出严格的 JSON（不要额外文本）："
                     "{"
                     "\"score\":number,"
@@ -623,15 +648,143 @@ class AIService:
                 )
                 text = self._chat_completion(
                     [{"role": "user", "content": prompt}],
-                    max_tokens=400,
+                    max_tokens=900,
                     temperature=0.2,
                 )
-                import json
-                return json.loads(text or '{}')
+                parsed = self._parse_json_object(text or '')
+                return self._normalize_evaluation(parsed, source='ai', transcript=transcript)
             except Exception:
                 pass
 
         return self._fallback_evaluation(transcript, mode=mode)
+
+    def _parse_json_object(self, text: str) -> dict:
+        raw = (text or '').strip()
+        if raw.startswith('```'):
+            raw = re.sub(r'^```(?:json)?\s*', '', raw)
+            raw = re.sub(r'\s*```$', '', raw)
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start >= 0 and end > start:
+                obj = json.loads(raw[start:end + 1])
+                return obj if isinstance(obj, dict) else {}
+            raise
+
+    def _candidate_response_profile(self, transcript: str) -> dict:
+        txt = transcript or ''
+        candidate_parts = []
+        for line in txt.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('[candidate]') or stripped.startswith('[user]'):
+                candidate_parts.append(re.sub(r'^\[(candidate|user)\]\s*', '', stripped))
+        candidate_txt = '\n'.join(candidate_parts).strip() or txt
+        answer_count = len([p for p in candidate_parts if p.strip()]) or (1 if candidate_txt else 0)
+
+        def count_hits(kws: list[str]) -> int:
+            return sum(1 for k in kws if k in candidate_txt)
+
+        tech_kw = ['原理', '设计', '实现', '算法', '架构', '性能', '优化']
+        solve_kw = ['分析', '定位', '排查', '权衡', '方案', '取舍']
+        comm_kw = ['条理', '表达', '沟通', '总结', '说明']
+        eng_kw = ['项目', '工程', '测试', '部署', '监控', '上线']
+        pot_kw = ['学习', '复盘', '改进', '成长', '好奇']
+        depth_kw = ['复杂度', '源码', '瓶颈', '边界', '数据', '指标', '对比', '方案']
+        structure_kw = ['首先', '其次', '最后', '第一', '第二', '因为', '所以']
+
+        return {
+            'text': candidate_txt,
+            'length': len(candidate_txt),
+            'answer_count': answer_count,
+            'tech_hits': count_hits(tech_kw),
+            'solve_hits': count_hits(solve_kw),
+            'comm_hits': count_hits(comm_kw),
+            'eng_hits': count_hits(eng_kw),
+            'pot_hits': count_hits(pot_kw),
+            'depth_hits': count_hits(depth_kw),
+            'structure_hits': count_hits(structure_kw),
+        }
+
+    def _score_cap_from_profile(self, profile: dict) -> int:
+        length = int(profile.get('length') or 0)
+        answer_count = int(profile.get('answer_count') or 0)
+        evidence_hits = (
+            int(profile.get('tech_hits') or 0)
+            + int(profile.get('solve_hits') or 0)
+            + int(profile.get('eng_hits') or 0)
+            + int(profile.get('depth_hits') or 0)
+        )
+        if length <= 0:
+            return 0
+        if length < 80:
+            return 35
+        if length < 200:
+            return 50
+        if length < 400:
+            return 62
+        if length < 800:
+            return 72
+        if length < 1400:
+            cap = 78
+        else:
+            cap = 84
+        if answer_count >= 4 and evidence_hits >= 8:
+            cap += 4
+        if answer_count >= 5 and evidence_hits >= 12 and int(profile.get('depth_hits') or 0) >= 3:
+            cap += 4
+        return min(92, cap)
+
+    def _normalize_evaluation(self, data: dict, source: str, transcript: str = '') -> dict:
+        weights = data.get('weights') or {
+            "technical_depth": 0.3,
+            "problem_solving": 0.2,
+            "communication": 0.2,
+            "engineering": 0.2,
+            "potential": 0.1
+        }
+        dims = data.get('dimensions') or {}
+
+        def clamp_score(v, default=0) -> int:
+            try:
+                return max(0, min(100, int(round(float(v)))))
+            except (TypeError, ValueError):
+                return default
+
+        dim_keys = ("technical_depth", "problem_solving", "communication", "engineering", "potential")
+        normalized_dims = {}
+        for key in dim_keys:
+            block = dims.get(key) if isinstance(dims, dict) else {}
+            if not isinstance(block, dict):
+                block = {}
+            normalized_dims[key] = {
+                "score": clamp_score(block.get('score')),
+                "evidence": list(block.get('evidence') or [])[:3],
+                "risks": list(block.get('risks') or [])[:3],
+                "suggestions": list(block.get('suggestions') or [])[:3],
+            }
+        weighted = sum(normalized_dims[k]["score"] * float(weights.get(k, 0)) for k in dim_keys)
+        raw_score = data.get('score')
+        score = clamp_score(raw_score, default=int(round(weighted)))
+        if source == 'ai' and any(normalized_dims[k]["score"] for k in dim_keys):
+            score = clamp_score(weighted)
+        if transcript:
+            cap = self._score_cap_from_profile(self._candidate_response_profile(transcript))
+            score = min(score, cap)
+            for key in dim_keys:
+                normalized_dims[key]["score"] = min(normalized_dims[key]["score"], cap + 4)
+        return {
+            "score": score,
+            "weights": weights,
+            "dimensions": normalized_dims,
+            "strengths": list(data.get('strengths') or [])[:3],
+            "weaknesses": list(data.get('weaknesses') or [])[:3],
+            "suggestions": list(data.get('suggestions') or [])[:3],
+            "summary": data.get('summary') or '',
+            "evaluation_source": source,
+        }
 
     def generate_interview_reply(
         self,
@@ -893,43 +1046,76 @@ class AIService:
         )
 
     def _fallback_evaluation(self, transcript: str, mode: str | None = None) -> dict:
-        txt = transcript or ''
-        length = len(txt)
-        # base score on length and presence of keywords
-        tech_kw = ['原理', '设计', '实现', '算法', '架构', '性能', '优化']
-        solve_kw = ['分析', '定位', '排查', '权衡', '方案', '取舍']
-        comm_kw = ['条理', '表达', '沟通', '总结', '说明']
-        eng_kw = ['项目', '工程', '测试', '部署', '监控', '上线']
-        pot_kw = ['学习', '复盘', '改进', '成长', '好奇']
-
-        def count_hits(kws: list[str]) -> int:
-            return sum(1 for k in kws if k in txt)
-
-        tech_hits = count_hits(tech_kw)
-        solve_hits = count_hits(solve_kw)
-        comm_hits = count_hits(comm_kw)
-        eng_hits = count_hits(eng_kw)
-        pot_hits = count_hits(pot_kw)
-
-        base = 10 if length > 0 else 0
-        score = min(90, int(min(100, base + length / 6 + (tech_hits + eng_hits) * 5)))
-        if mode == 'test':
-            score = max(0, int(score * 0.92))
+        profile = self._candidate_response_profile(transcript)
+        length = int(profile['length'])
+        answer_count = int(profile['answer_count'])
+        tech_hits = int(profile['tech_hits'])
+        solve_hits = int(profile['solve_hits'])
+        comm_hits = int(profile['comm_hits'])
+        eng_hits = int(profile['eng_hits'])
+        pot_hits = int(profile['pot_hits'])
+        depth_hits = int(profile['depth_hits'])
+        structure_hits = int(profile['structure_hits'])
 
         def clamp(v: float) -> int:
-            return max(0, min(100, int(v)))
+            return max(0, min(92, int(round(v))))
 
-        dim_scores = {
-            "technical_depth": clamp(score * 0.9 + tech_hits * 6),
-            "problem_solving": clamp(score * 0.85 + solve_hits * 7),
-            "communication": clamp(score * 0.8 + comm_hits * 8),
-            "engineering": clamp(score * 0.88 + eng_hits * 6),
-            "potential": clamp(score * 0.82 + pot_hits * 7)
+        if length == 0:
+            dim_scores = {
+                "technical_depth": 0,
+                "problem_solving": 0,
+                "communication": 0,
+                "engineering": 0,
+                "potential": 0
+            }
+        else:
+            volume = min(14, length / 80)
+            rounds = min(6, answer_count * 1.5)
+            dim_scores = {
+                "technical_depth": clamp(18 + volume + rounds + tech_hits * 4 + depth_hits * 3),
+                "problem_solving": clamp(18 + volume * 0.8 + rounds + solve_hits * 5 + depth_hits * 2),
+                "communication": clamp(28 + min(12, length / 100) + comm_hits * 4 + structure_hits * 3),
+                "engineering": clamp(16 + volume + eng_hits * 6 + min(8, depth_hits * 2)),
+                "potential": clamp(24 + min(10, length / 120) + pot_hits * 5 + min(6, structure_hits * 2)),
+            }
+            cap = self._score_cap_from_profile(profile)
+            dim_scores = {k: min(v, cap) for k, v in dim_scores.items()}
+
+        weights = {
+            "technical_depth": 0.3,
+            "problem_solving": 0.2,
+            "communication": 0.2,
+            "engineering": 0.2,
+            "potential": 0.1
         }
+        score = int(round(sum(dim_scores[k] * weights[k] for k in weights)))
+        if mode == 'test':
+            score = max(0, score - 5)
+            dim_scores = {k: max(0, v - 5) for k, v in dim_scores.items()}
 
-        strengths = ["回答条理较清晰", "包含技术细节", "有项目经验示例"] if (tech_hits + eng_hits) > 0 else ["表达清晰", "反应速度尚可", "态度积极"]
-        weaknesses = ["可以给出更多实现细节", "问题分析过程描述不足", "示例细节过于简略"]
-        suggestions = ["复盘核心项目的设计与取舍", "准备常见问题的分析思路", "练习用 STAR 方法表达关键经历"]
+        strengths = []
+        if dim_scores["communication"] >= 70:
+            strengths.append("表达结构较清晰")
+        if dim_scores["technical_depth"] >= 70:
+            strengths.append("能够覆盖技术实现或原理")
+        if dim_scores["engineering"] >= 70:
+            strengths.append("有一定项目与工程实践描述")
+        strengths = strengths or ["能完成基础作答", "态度积极"]
+
+        weaknesses = []
+        if length < 400:
+            weaknesses.append("回答篇幅和有效信息偏少")
+        if dim_scores["technical_depth"] < 70:
+            weaknesses.append("技术细节与底层原理证据不足")
+        if dim_scores["problem_solving"] < 70:
+            weaknesses.append("问题分析过程和取舍说明不够完整")
+        weaknesses = weaknesses or ["仍可补充更多量化结果和边界案例"]
+
+        suggestions = [
+            "按背景、方案、取舍、结果组织核心项目回答",
+            "补充关键实现、复杂度、边界条件和验证方式",
+            "准备可量化的线上指标、测试或优化案例"
+        ]
 
         def dim_block(score_value: int, evidence: list[str], risks: list[str], sugg: list[str]) -> dict:
             return {
@@ -974,18 +1160,13 @@ class AIService:
 
         return {
             "score": score,
-            "weights": {
-                "technical_depth": 0.3,
-                "problem_solving": 0.2,
-                "communication": 0.2,
-                "engineering": 0.2,
-                "potential": 0.1
-            },
+            "weights": weights,
             "dimensions": dimensions,
             "strengths": strengths[:3],
             "weaknesses": weaknesses[:3],
             "suggestions": suggestions[:3],
-            "summary": "整体表现具备基础能力，建议补充技术细节并加强结构化表达。"
+            "summary": "本报告由规则兜底评分生成，仅基于回答长度、关键词和结构化证据估算；建议配置大模型后获得更准确的评估。",
+            "evaluation_source": "fallback"
         }
 
 

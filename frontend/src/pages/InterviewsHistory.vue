@@ -57,6 +57,10 @@
         <div class="chips">
           <span v-for="(s, idx) in (item.report?.strengths || []).slice(0, 2)" :key="idx" class="chip">{{ s }}</span>
         </div>
+        <div class="record-actions">
+          <button class="ghost small-btn" type="button" @click.stop="startEdit(item)">编辑</button>
+          <button class="danger small-btn" type="button" @click.stop="removeRecord(item)">删除</button>
+        </div>
       </article>
     </div>
 
@@ -66,6 +70,8 @@
           <h2>{{ selected.role }} · 报告回看</h2>
           <div class="panel-actions">
             <button class="ghost" @click="replayContext(selected)">回放到该次对话上下文</button>
+            <button class="ghost" @click="startEdit(selected)">编辑</button>
+            <button class="danger" @click="removeRecord(selected)">删除</button>
             <button class="ghost" @click="selected = null">关闭</button>
           </div>
         </header>
@@ -142,6 +148,56 @@
         </section>
       </div>
     </div>
+
+    <div v-if="editing" class="overlay" @click.self="cancelEdit">
+      <form class="panel edit-panel" @submit.prevent="saveEdit">
+        <header class="panel-head">
+          <h2>编辑历史记录</h2>
+          <button class="ghost" type="button" @click="cancelEdit">关闭</button>
+        </header>
+
+        <div class="edit-grid">
+          <label>
+            岗位
+            <input v-model.trim="editForm.role" type="text" placeholder="例如 Java后端" />
+          </label>
+          <label>
+            模式
+            <select v-model="editForm.mode">
+              <option value="practice">练习</option>
+              <option value="test">测评</option>
+            </select>
+          </label>
+          <label>
+            难度
+            <input v-model.number="editForm.difficulty" type="number" min="1" max="5" />
+          </label>
+          <label>
+            时长（分钟）
+            <input v-model.number="editForm.timeLimit" type="number" min="0" />
+          </label>
+          <label>
+            综合得分
+            <input v-model.number="editForm.score" type="number" min="0" max="100" />
+          </label>
+          <label>
+            关注重点
+            <input v-model.trim="editForm.focus" type="text" placeholder="综合/技术深度/项目实践" />
+          </label>
+        </div>
+
+        <label class="summary-field">
+          总结
+          <textarea v-model.trim="editForm.summary" rows="4" placeholder="补充或修正本次报告总结" />
+        </label>
+
+        <p v-if="editError" class="error-text">{{ editError }}</p>
+        <div class="panel-actions edit-actions">
+          <button class="ghost" type="button" :disabled="savingEdit" @click="cancelEdit">取消</button>
+          <button type="submit" :disabled="savingEdit">{{ savingEdit ? '保存中...' : '保存' }}</button>
+        </div>
+      </form>
+    </div>
   </section>
 </template>
 
@@ -150,7 +206,13 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import RadarChart from '../components/RadarChart.vue'
 import ScoreTrendChart from '../components/ScoreTrendChart.vue'
-import { clearInterviewReports, computeRadarDimensions, loadReportsMerged } from '../services/reportStore'
+import {
+  clearInterviewReports,
+  computeRadarDimensions,
+  deleteInterviewReport,
+  loadReportsMerged,
+  updateInterviewReport
+} from '../services/reportStore'
 
 const TREND_LIMIT = 12
 
@@ -162,6 +224,18 @@ export default {
     const records = ref([])
     const selected = ref(null)
     const observerRef = ref(null)
+    const editing = ref(null)
+    const editForm = ref({
+      role: '',
+      focus: '',
+      mode: 'practice',
+      difficulty: 3,
+      timeLimit: 0,
+      score: 0,
+      summary: ''
+    })
+    const savingEdit = ref(false)
+    const editError = ref('')
 
     const trendPoints = computed(() => {
       const sorted = [...records.value]
@@ -298,6 +372,76 @@ export default {
       selected.value = null
     }
 
+    function startEdit(item) {
+      if (!item) return
+      editing.value = item
+      editError.value = ''
+      editForm.value = {
+        role: item.role || '',
+        focus: item.focus || '',
+        mode: item.mode || 'practice',
+        difficulty: Number(item.difficulty) || 3,
+        timeLimit: Number(item.timeLimit) || 0,
+        score: Number(item.report?.score) || 0,
+        summary: item.report?.summary || ''
+      }
+    }
+
+    function cancelEdit() {
+      editing.value = null
+      editError.value = ''
+    }
+
+    async function saveEdit() {
+      if (!editing.value) return
+      savingEdit.value = true
+      editError.value = ''
+      try {
+        const score = Math.max(0, Math.min(100, Number(editForm.value.score) || 0))
+        const patch = {
+          role: editForm.value.role || null,
+          focus: editForm.value.focus || null,
+          mode: editForm.value.mode || 'practice',
+          difficulty: Number(editForm.value.difficulty) || 3,
+          time_limit: Number(editForm.value.timeLimit) || null,
+          timeLimit: Number(editForm.value.timeLimit) || null,
+          report: {
+            score,
+            summary: editForm.value.summary || ''
+          },
+          score,
+          summary: editForm.value.summary || ''
+        }
+        await updateInterviewReport(editing.value, patch)
+        await loadRecords()
+        const updated = records.value.find(r => String(r.id) === String(editing.value.id))
+        selected.value = updated || selected.value
+        editing.value = null
+      } catch (err) {
+        editError.value = err.message || String(err)
+      } finally {
+        savingEdit.value = false
+      }
+    }
+
+    async function removeRecord(item) {
+      if (!item) return
+      const ok = window.confirm(`确定删除「${item.role || '未标注岗位'}」这条历史记录吗？`)
+      if (!ok) return
+      try {
+        await deleteInterviewReport(item)
+        records.value = records.value.filter(r => String(r.id) !== String(item.id))
+        if (selected.value && String(selected.value.id) === String(item.id)) {
+          selected.value = null
+        }
+        if (editing.value && String(editing.value.id) === String(item.id)) {
+          editing.value = null
+        }
+      } catch (err) {
+        window.alert(`删除失败：${err.message || err}`)
+      }
+    }
+
     function staggerStyle(index) {
       return { '--stagger-index': String(index % 8) }
     }
@@ -380,7 +524,15 @@ export default {
       replayContext,
       staggerStyle,
       dimensionItems,
-      dimensionOverview
+      dimensionOverview,
+      editing,
+      editForm,
+      editError,
+      savingEdit,
+      startEdit,
+      cancelEdit,
+      saveEdit,
+      removeRecord
     }
   }
 }
@@ -481,11 +633,31 @@ export default {
 .dim-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .dim-chip { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #f0f6ff; color: #315c9a; }
 .ghost { background: #fff; color: #1f4fb9; border: 1px solid rgba(37, 89, 214, 0.2); }
+.danger { background: #fff; color: #b42318; border: 1px solid rgba(180, 35, 24, 0.24); }
+.record-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.small-btn { min-height: 30px; padding: 5px 10px; font-size: 12px; }
 .overlay { position: fixed; inset: 0; background: rgba(14, 8, 24, 0.5); z-index: 1100; display: flex; justify-content: center; align-items: center; padding: 10px; }
 .panel { width: min(820px, 95vw); max-height: 90vh; overflow: auto; border-radius: 14px; background: #fff; padding: 16px; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; }
 .panel-head h2 { margin: 0; }
 .panel-actions { display: flex; gap: 8px; }
+.edit-panel { width: min(680px, 95vw); }
+.edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.edit-grid label,
+.summary-field { display: grid; gap: 6px; color: #52698c; font-size: 13px; }
+.edit-grid input,
+.edit-grid select,
+.summary-field textarea {
+  border: 1px solid rgba(37, 89, 214, 0.18);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font: inherit;
+  color: #1b2b45;
+  background: #fff;
+}
+.summary-field { margin-top: 12px; }
+.edit-actions { justify-content: flex-end; margin-top: 12px; }
+.error-text { color: #b42318; margin: 10px 0 0; }
 .score-line { display: flex; justify-content: space-between; align-items: baseline; margin: 10px 0 4px; }
 .score-line b { font-size: 28px; color: #1a4699; }
 .group { margin-top: 10px; }
@@ -511,6 +683,7 @@ export default {
 @media (max-width: 860px) {
   .hero { flex-direction: column; align-items: flex-start; }
   .trend-head { flex-direction: column; }
+  .edit-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -572,6 +745,13 @@ export default {
 :global([data-theme="dark"]) .dimension-card,
 :global([data-theme="dark"]) .dimension-toggle {
   background: #121a26;
+  border-color: rgba(122, 162, 255, 0.18);
+}
+:global([data-theme="dark"]) .edit-grid input,
+:global([data-theme="dark"]) .edit-grid select,
+:global([data-theme="dark"]) .summary-field textarea {
+  background: #0f172a;
+  color: #ffffff;
   border-color: rgba(122, 162, 255, 0.18);
 }
 </style>

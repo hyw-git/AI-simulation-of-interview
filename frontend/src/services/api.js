@@ -114,7 +114,7 @@ export async function fetchFollowups(interviewId, answer){ return request(`/inte
 export async function createInterview(payload){ return request('/interviews', { method:'POST', json: payload }) }
 export async function fetchInterviewCapabilities(){ return request('/interviews/capabilities') }
 export async function analyzeRepo(url){ return request('/interviews/analyze-repo', { method:'POST', json: { url } }) }
-export async function fetchCodingChallenge(interviewId){ return request(`/interviews/${interviewId}/coding/challenge`, { method:'POST', json: {} }) }
+export async function fetchCodingChallenge(interviewId, options = {}){ return request(`/interviews/${interviewId}/coding/challenge`, { method:'POST', json: options }) }
 export async function runInterviewCode(interviewId, payload){ return request(`/interviews/${interviewId}/coding/run`, { method:'POST', json: payload }) }
 export async function testInterviewCode(interviewId, payload){ return request(`/interviews/${interviewId}/coding/test`, { method:'POST', json: payload }) }
 export async function submitInterviewCode(interviewId, payload){ return request(`/interviews/${interviewId}/coding/submit`, { method:'POST', json: payload }) }
@@ -149,9 +149,11 @@ export async function fetchReports(userId){
   const params = userId ? { user_id: userId } : undefined
   return request('/interviews/reports', { params })
 }
+export async function updateReport(reportId, payload){ return request(`/interviews/reports/${reportId}`, { method:'PATCH', json: payload }) }
+export async function deleteReport(reportId){ return request(`/interviews/reports/${reportId}`, { method:'DELETE' }) }
 
 export default {
   health, fetchInterviews, fetchQuestions, fetchRagQuestions, fetchRagRoles, fetchJobs,
   authRegister, authLogin, authRefresh, authLogout, authMe, authUpdateMe, authChangePassword, authGetResume, authUpdateResume, authUploadResume, startAttempt, submitAttempt, fetchAttempts,
-  fetchFollowups, createInterview, fetchInterviewCapabilities, openInterviewWs, transcribeAudioFile, fetchDashboard, evaluateInterview, fetchReports
+  fetchFollowups, createInterview, fetchInterviewCapabilities, openInterviewWs, transcribeAudioFile, fetchDashboard, evaluateInterview, fetchReports, updateReport, deleteReport
 }

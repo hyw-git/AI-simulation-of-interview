@@ -205,11 +205,11 @@
         <button
           v-if="enableCoding && configConfirmed && interviewId"
           class="ghost coding-btn"
-          :class="{ active: codingVisible, pending: codingChallenge && !codingVisible }"
+          :class="{ active: codingVisible, pending: codingChallenge && !codingCompleted && !codingVisible }"
           :disabled="connecting || generatingReport"
           @click="codingVisible = !codingVisible"
         >
-          {{ codingVisible ? '收起代码' : (codingChallenge ? '代码题待完成' : '代码实战') }}
+          {{ codingVisible ? '收起代码' : (codingChallenge && !codingCompleted ? '代码题待完成' : '代码实战') }}
         </button>
         <button
           class="report-btn"
@@ -227,6 +227,7 @@
       :external-challenge="codingChallenge"
       @close="codingVisible = false"
       @submitted="onCodingSubmitted"
+      @challenge-changed="onCodingChallengeChanged"
     />
 
     <main ref="scrollRef" class="iv-messages" :class="{ 'with-report': reportVisible }">
@@ -484,6 +485,7 @@ export default {
     const repoAnalyzing = ref(false)
     const enableCoding = ref(false)
     const codingVisible = ref(false)
+    const codingCompleted = ref(false)
     const seedQuestionId = ref('')
     const seedQuestionTitle = ref('')
 
@@ -661,6 +663,7 @@ export default {
 
         if (data.coding_offer?.challenge) {
           codingChallenge.value = data.coding_offer.challenge
+          codingCompleted.value = false
           if (data.coding_offer.auto_open) {
             codingVisible.value = true
           }
@@ -763,6 +766,7 @@ export default {
 
     function onCodingSubmitted(payload) {
       codingChallenge.value = null
+      codingCompleted.value = true
       const ev = payload?.evaluation || {}
       const title = payload?.challenge?.title || '代码题'
       const score = ev.score != null ? ev.score : '-'
@@ -783,6 +787,13 @@ export default {
         ragCount: 0
       })
       scrollToBottom()
+    }
+
+    function onCodingChallengeChanged(challenge) {
+      codingChallenge.value = challenge || null
+      if (challenge?.title) {
+        codingCompleted.value = false
+      }
     }
 
     async function startInterview() {
@@ -811,12 +822,14 @@ export default {
         currentRound.value = 0
         enableCoding.value = Boolean(res.enable_coding ?? res.opening?.enable_coding)
         codingVisible.value = false
+        codingCompleted.value = false
         if (res.repo_analysis && !res.repo_analysis.error) {
           repoAnalysis.value = res.repo_analysis
         }
         interviewStrategyLabel.value = res.opening?.strategy_label || ''
         interviewStrategy.value = res.opening?.strategy || ''
         codingChallenge.value = null
+        codingCompleted.value = false
         const st = res.opening?.strategy
         if (st === 'resume_led') {
           interviewPhase.value = 'resume'
@@ -941,6 +954,7 @@ export default {
       interviewStrategy.value = ''
       codingChallenge.value = null
       codingVisible.value = false
+      codingCompleted.value = false
       currentRound.value = 0
       lastFollowups.value = []
       messages.value = []
@@ -991,7 +1005,8 @@ export default {
           suggestions: suggestions.length ? suggestions : ['暂无'],
           dimensions: res?.dimensions || {},
           weights: res?.weights || {},
-          summary: res?.summary || ''
+          summary: res?.summary || '',
+          evaluation_source: res?.evaluation_source || ''
         }
 
         radarData.value = computeRadarDimensions(interviewReport.value)
@@ -1347,10 +1362,12 @@ export default {
       repoAnalyzing,
       enableCoding,
       codingVisible,
+      codingCompleted,
       seedQuestionId,
       seedQuestionTitle,
       analyzeRepoPreview,
       onCodingSubmitted,
+      onCodingChallengeChanged,
       lastFollowups,
       applyFollowup
     }
